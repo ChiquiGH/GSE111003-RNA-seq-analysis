@@ -1,0 +1,304 @@
+---
+title: "Untitled"
+author: "Francisco José González Hernández"
+date: "2026-02-22"
+output: html_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+rm(list = ls())
+
+# Paquetes generales
+library(dplyr)
+library(stringr)
+library(purrr)
+library(tibble)
+library(data.table)
+
+# Visualización
+library(ggplot2)
+library(ggpubr)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(circlize)
+library(factoextra)
+
+# RNA-seq
+library(edgeR)
+library(DESeq2)
+
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  dpi = 300, fig.height = 4, fig.width = 7,
+  fig.align = "center"
+)
+
+# Project path + helpers
+projectPath <- getwd()
+source(file.path(projectPath, "SRC", "helperFunctions.R"))
+
+# Ruta a mmseq (ajusta si fuese necesario)
+dir_mmseq <- "C:/Users/Chiqui/Desktop/Máster en Bioinformática/Obtención, Análisis e Interpretación de Datos Ómicos/Práctica/Práctica 1. DESeq/data/mmseq"
+stopifnot(dir.exists(dir_mmseq))
+
+```
+
+1. INTRODUCCIÓN 
+En esta práctica analizamos el dataset GSE111003 a partir de conteos no normalizada (RNA-seq).
+
+Nos centramos en la respuesta temprana de monocitos humanos a β-glucano (BG), considerando controles "time-mached" en medio (RPMI) y tiempos T0, 4h y 24h. 
+
+2. CONSTRUCCIÓN DE LA MATRIZ DE CONTEOS (mmseq)
+Cada archivo *.gene.mmseq.txt corresponde a una muestra. A partir de la columna unique_hits (conteos enteros por gen) construimos una matriz genes x muestras.
+
+
+```{r}
+rawCounts <- build_count_matrix_mmseq(dir_mmseq)
+dim(rawCounts)
+rawCounts[1:10, 1:5]
+```
+
+3. METADATOS DE MUESTRAS (samplesMetadata)
+
+Los nombres de muestra contienen información del donante y condición. Creamos un samplesMetadata con variables clave: Donor, Time, treatment, Condition.
+
+
+```{r}
+samplesMetadata <- make_samples_metadata(colnames(rawCounts))
+table(samplesMetadata$Condition, useNA = "ifany")
+table(samplesMetadata$Time, useNA = "ifany")
+head(samplesMetadata)
+```
+
+4. SUBCONJUNTO DEL ANÁLISIS (fase temprana BG)
+Incluimos: T0, RPMI_4h, BG_4h, RPMI_24h, BG_24h.
+
+```{r}
+bg <- subset_phase_BG_early(rawCounts, samplesMetadata)
+rawCounts_BG <- bg$counts
+meta_BG <- bg$meta
+
+dim(rawCounts_BG)
+table(meta_BG$Condition)
+```
+
+5. FILTRADO DE GENES DE BAJA EXPRESION
+
+```{r}
+pct_all_zero <- (sum(rowSums(rawCounts_BG == 0) == ncol(rawCounts_BG)) / nrow(rawCounts_BG)) * 100
+round(pct_all_zero, 2)
+
+rawCounts_BG <- rawCounts_BG[rowSums(rawCounts_BG == 0) != ncol(rawCounts_BG), ]
+rawCounts_BG <- rawCounts_BG[rowSums(rawCounts_BG) > 1, ]
+dim(rawCounts_BG)
+```
+```{r}
+genes_to_keep <- filterByExpr(rawCounts_BG, group = meta_BG$Condition)
+table(genes_to_keep)
+
+rawCounts_BG_filt <- rawCounts_BG[genes_to_keep, , drop = FALSE]
+dim(rawCounts_BG_filt)
+```
+
+6. NORMALIZACIÓN INTRA-MUESTRA (CPM / logCMP)
+```{r}
+cat("Library sizes (millions):\n")
+cat("Mean:", mean(colSums(rawCounts_BG_filt)) * 1e-6, "\n")
+cat("Min :", min(colSums(rawCounts_BG_filt)) * 1e-6, "\n")
+cat("Max :", max(colSums(rawCounts_BG_filt)) * 1e-6, "\n")
+
+cpm_filt <- cpm(rawCounts_BG_filt)
+logcpm_filt <- cpm(rawCounts_BG_filt, log = TRUE)
+```
+
+```{r}
+par(mfrow = c(1,2), mar = c(4.1, 4.1, 2.4, 1.2))
+hist(rawCounts_BG_filt, breaks = 100, main = "Raw counts (filtrados)", xlab = "counts")
+hist(logcpm_filt, breaks = 100, main = "logCPM (filtrados)", xlab = "logCPM")
+```
+7. NORMALIZACIÓN INTER-MUESTRA (TMM) Y LOGCPM NORMALIZADO
+
+Aplicamos TMM para ajustar posibles sesgos de composición y comparar distribuciones entre muestras
+
+
+```{r}
+DGE_BG <- DGEList(
+  counts = rawCounts_BG_filt,
+  samples = meta_BG,
+  group = meta_BG$Condition
+)
+DGE_BG <- calcNormFactors(DGE_BG, method = "TMM")
+lcpmTMM_BG <- cpm(DGE_BG, log = TRUE)
+
+lcpmTMM_BG[1:5, 1:5]
+```
+
+```{r}
+par(mfrow = c(2,2), mar = c(1.1, 4.1, 1.9, 1.2))
+boxplot(rawCounts_BG_filt, las = 2, cex.axis = 0.7, main = "A. Raw (filtrado)", xaxt = "n")
+boxplot(cpm_filt, las = 2, cex.axis = 0.7, main = "B. CPM", xaxt = "n")
+boxplot(logcpm_filt, las = 2, cex.axis = 0.7, main = "C. logCPM", xaxt = "n")
+abline(h = median(logcpm_filt), col="blue")
+boxplot(lcpmTMM_BG, las = 2, cex.axis = 0.7, main = "D. TMM + logCPM", xaxt = "n")
+abline(h = median(lcpmTMM_BG), col="blue")
+```
+
+8. PCA (NO SUPERVISADO)
+
+PCA sobre lcpmTMM_BG escalado por gen
+
+
+```{r}
+PCA_BG <- prcomp(scale(t(lcpmTMM_BG)))
+```
+
+```{r}
+p1 <- plotPCA(
+  PCA_BG,
+  col.points = as.factor(meta_BG$Condition),
+  shape.points = as.factor(meta_BG$Donor),
+  palette = color.list(),
+  legend.col = "Condition",
+  title = "PCA (TMM logCPM, scaled): Condition / Donor"
+)
+p1
+```
+
+9. DISTANCIAS Y CORRELACIONES ENTRE MUESTRAS
+
+```{r}
+sampleDists <- dist(t(lcpmTMM_BG), method = "euclidean")
+matDists <- as.matrix(sampleDists)
+
+corP <- cor(lcpmTMM_BG, method = "pearson")
+```
+
+
+```{r}
+ha <- HeatmapAnnotation(
+  df = meta_BG %>% as.data.frame() %>% select(Donor, Condition, Time, Treatment),
+  col = list(
+    Donor = setNames(color.list()[1:length(unique(meta_BG$Donor))], unique(meta_BG$Donor)),
+    Condition = setNames(color.list()[1:length(unique(meta_BG$Condition))], unique(meta_BG$Condition)),
+    Time = setNames(color.list()[1:length(unique(meta_BG$Time))], unique(meta_BG$Time)),
+    Treatment = setNames(color.list()[1:length(unique(meta_BG$Treatment))], unique(meta_BG$Treatment))
+  )
+)
+
+Heatmap(
+  matDists,
+  name = "Euclidean\ndistance",
+  top_annotation = ha,
+  show_column_names = FALSE, show_row_names = TRUE,
+  row_names_gp = gpar(fontsize = 7),
+  column_title = "Euclidean distances (TMM logCPM space)",
+  border = TRUE
+)
+```
+
+
+
+```{r}
+Heatmap(
+  corP,
+  name = "Pearson\ncor",
+  top_annotation = ha,
+  show_column_names = FALSE, show_row_names = TRUE,
+  row_names_gp = gpar(fontsize = 7),
+  column_title = "Pearson correlations (TMM logCPM space)",
+  border = TRUE
+)
+```
+
+10.EXPRESIÓN DIFERENCIAL CON DESEQ2 (CONTRASTES PRINCIPALES)
+
+DESeq2 se aplica sobre conteos crudos filtrados (rawCounts_BG_filt), controlando la variabilidad por donante. 
+
+```{r}
+dds_BG <- DESeqDataSetFromMatrix(
+  countData = rawCounts_BG_filt,
+  colData = meta_BG,
+  design = ~ Donor + Condition
+)
+
+# Definimos el orden para contrastes claros
+dds_BG$Condition <- factor(dds_BG$Condition, levels = c("RPMI_4h", "BG_4h", "RPMI_24h", "BG_24h", "T0"))
+
+dds_BG <- DESeq(dds_BG)
+
+res_BG_4h <- results(dds_BG, contrast = c("Condition", "BG_4h", "RPMI_4h"))
+res_BG_24h <- results(dds_BG, contrast = c("Condition", "BG_24h", "RPMI_24h"))
+
+summary(res_BG_4h)
+summary(res_BG_24h)
+```
+
+
+10.1 Volcano plot (BG_24h vs RPMI_24h)
+```{r}
+res24 <- as.data.frame(res_BG_24h) %>%
+  rownames_to_column("gene") %>%
+  mutate(signif = !is.na(padj) & padj < 0.1)
+
+ggplot(res24, aes(log2FoldChange, -log10(padj))) +
+  geom_point(aes(color = signif), alpha = 0.6, size = 1.3) +
+  theme_minimal() +
+  labs(title = "Volcano: BG_24h vs RPMI_24h (DESeq2)",
+       x = "log2 Fold Change", y = "-log10(padj)")
+```
+
+10.2 Heatmap top genes (Vst)
+```{r}
+vsd <- vst(dds_BG, blind = FALSE)
+mat <- assay(vsd)
+
+topN <- 50
+top_genes <- res24 %>%
+  filter(!is.na(padj)) %>%
+  arrange(padj) %>%
+  slice_head(n = topN) %>%
+  pull(gene)
+
+mat_top <- mat[top_genes, , drop = FALSE]
+mat_top_z <- t(scale(t(mat_top)))
+mat_top_z[is.na(mat_top_z)] <- 0
+```
+
+
+```{r}
+Heatmap(
+  mat_top_z,
+  name = "z(vst)",
+  top_annotation = ha,
+  show_column_names = FALSE,
+  row_names_gp = gpar(fontsize = 6),
+  column_title = paste0("Top ", topN, " genes (BG_24h vs RPMI_24h)"),
+  border = TRUE
+)
+```
+
+11. TABLA DE RECURSOS Y REPRODUCIBILIDAD
+
+```{r}
+sessionInfo()
+```
+
+```{r}
+table(meta_BG$Condition)
+table(meta_BG$Donor)
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+
+```
