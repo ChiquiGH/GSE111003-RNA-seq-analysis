@@ -233,8 +233,50 @@ summary(res_BG_4h)
 summary(res_BG_24h)
 ```
 
+10.1 Volcano plot (BG_4h vs RPMI_4h)
+```{r}
+res24 <- as.data.frame(res_BG_4h) %>%
+  rownames_to_column("gene") %>%
+  mutate(signif = !is.na(padj) & padj < 0.1)
 
-10.1 Volcano plot (BG_24h vs RPMI_24h)
+ggplot(res24, aes(log2FoldChange, -log10(padj))) +
+  geom_point(aes(color = signif), alpha = 0.6, size = 1.3) +
+  theme_minimal() +
+  labs(title = "Volcano: BG_4h vs RPMI_4h (DESeq2)",
+       x = "log2 Fold Change", y = "-log10(padj)")
+```
+
+Heatmap top genes (Vst)
+```{r}
+vsd <- vst(dds_BG, blind = FALSE)
+mat <- assay(vsd)
+
+topN <- 50
+top_genes <- res4 %>%
+  filter(!is.na(padj)) %>%
+  arrange(padj) %>%
+  slice_head(n = topN) %>%
+  pull(gene)
+
+mat_top <- mat[top_genes, , drop = FALSE]
+mat_top_z <- t(scale(t(mat_top)))
+mat_top_z[is.na(mat_top_z)] <- 0
+```
+
+
+```{r}
+Heatmap(
+  mat_top_z,
+  name = "z(vst)",
+  top_annotation = ha,
+  show_column_names = FALSE,
+  row_names_gp = gpar(fontsize = 6),
+  column_title = paste0("Top ", topN, " genes (BG_24h vs RPMI_24h)"),
+  border = TRUE
+)
+```
+
+10.2 Volcano plot (BG_24h vs RPMI_24h)
 ```{r}
 res24 <- as.data.frame(res_BG_24h) %>%
   rownames_to_column("gene") %>%
@@ -247,7 +289,7 @@ ggplot(res24, aes(log2FoldChange, -log10(padj))) +
        x = "log2 Fold Change", y = "-log10(padj)")
 ```
 
-10.2 Heatmap top genes (Vst)
+Heatmap top genes (Vst)
 ```{r}
 vsd <- vst(dds_BG, blind = FALSE)
 mat <- assay(vsd)
@@ -288,17 +330,3 @@ table(meta_BG$Condition)
 table(meta_BG$Donor)
 ```
 
-
-```{r}
-
-```
-
-
-```{r}
-
-```
-
-
-```{r}
-
-```
